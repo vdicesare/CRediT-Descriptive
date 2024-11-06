@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it as below."
+authors:
+  - family-names: Di Césare
+    given-names: Victoria
+    orcid: https://orcid.org/0000-0001-7098-1914
+title: "CRediT descriptive code"
+version: 1.0.0
+date-released: 2024-10-10
