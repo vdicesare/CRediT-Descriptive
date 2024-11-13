@@ -1,4 +1,4 @@
-# An analysis of CRediT contributions by field from Scopus and PLOS, 2017-2024
+# Beyond authorship: Analyzing disciplinary patterns of contribution statements using the CRediT taxonomy
 
 Elvira González-Salmón (1), Victoria Di Césare (1), Aoxia Xiao (2) and Nicolas Robinson-Garcia (1)
 
