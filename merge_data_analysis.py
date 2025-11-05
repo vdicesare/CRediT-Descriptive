@@ -24,6 +24,8 @@ display(structured_Scopus)
 from pyspark.sql.functions import expr
 # filter to keep only rows where "publication_type" is "ar"
 structured_Scopus = structured_Scopus.filter(structured_Scopus.publication_type == "ar")
+# filter to keep only rows where "Year" is 2020, 2021, 2022, or 2023
+structured_Scopus = structured_Scopus.filter(structured_Scopus.Year.isin([2020, 2021, 2022, 2023]))
 # filter to keep rows where "credit.auid" matches "au.auid"
 structured_Scopus = structured_Scopus.filter(expr("credit.auid = au.auid"))
 display(structured_Scopus)
@@ -268,7 +270,7 @@ df_final = df_final.withColumn("fields",
     .otherwise("multidisciplinary"))
 display(df_final)
 
-### FIGURE 1 + SUPPLEMENTARY MATERIAL 1
+### FIGURE 2 + SUPPLEMENTARY MATERIAL 1
 from pyspark.sql import functions as F
 # group by 'year' and count distinct DOIs
 supplementary_material_1A = df_final.groupBy('year').agg(F.countDistinct('doi').alias('unique_dois'))
@@ -288,6 +290,116 @@ supplementary_material_1C = df_final.groupBy("year", "subjareas").agg(
     F.countDistinct("doi").alias("unique_dois"))
 display(supplementary_material_1C)
 
+### TABLE 1
+df_unique = df_final.select("eid", "auid", "fields").dropDuplicates()
+from pyspark.sql import functions as F
+authors_per_paper = df_unique.groupBy("eid").agg(
+    F.countDistinct("auid").alias("num_au"))
+summary_overall = (
+    authors_per_paper.agg(
+        F.expr("percentile_approx(num_au, 0.0)").alias("min"),
+        F.expr("percentile_approx(num_au, 0.25)").alias("q1"),
+        F.expr("percentile_approx(num_au, 0.5)").alias("median"),
+        F.avg("num_au").alias("mean"),
+        F.expr("percentile_approx(num_au, 0.75)").alias("q3"),
+        F.expr("percentile_approx(num_au, 1.0)").alias("max"),
+        F.stddev("num_au").alias("sd")))
+# mode
+mode_value = (
+    authors_per_paper.groupBy("num_au")
+    .agg(F.count("*").alias("freq"))
+    .orderBy(F.desc("freq"), F.asc("num_au"))
+    .limit(1)
+    .collect()[0]["num_au"])
+summary_with_mode = summary_overall.withColumn("mode", F.lit(mode_value))
+summary_with_mode.show(truncate=False)
+from pyspark.sql.window import Window
+# count authors per paper per field
+authors_per_paper_field = df_unique.groupBy("fields", "eid").agg(
+    F.countDistinct("auid").alias("num_au"))
+# summary stats per field
+summary_by_field = (
+    authors_per_paper_field.groupBy("fields")
+    .agg(
+        F.expr("percentile_approx(num_au, 0.0)").alias("min"),
+        F.expr("percentile_approx(num_au, 0.25)").alias("q1"),
+        F.expr("percentile_approx(num_au, 0.5)").alias("median"),
+        F.avg("num_au").alias("mean"),
+        F.expr("percentile_approx(num_au, 0.75)").alias("q3"),
+        F.expr("percentile_approx(num_au, 1.0)").alias("max"),
+        F.stddev("num_au").alias("sd")))
+# mode per field
+window = Window.partitionBy("fields").orderBy(F.desc("freq"), F.asc("num_au"))
+mode_df = (
+    authors_per_paper_field.groupBy("fields", "num_au")
+    .agg(F.count("*").alias("freq"))
+    .withColumn("rank", F.row_number().over(window))
+    .filter(F.col("rank") == 1)
+    .select("fields", F.col("num_au").alias("mode")))
+# join mode to summary
+summary_by_field_with_mode = summary_by_field.join(mode_df, on="fields")
+summary_by_field_with_mode.show(truncate=False)
+
+### TABLE 2
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+# keep only unique (eid, credit, fields) combinations
+df_credit = df_final.select("eid", "credit", "fields").dropDuplicates()
+# split credit by comma and explode so each role is in a separate row
+df_credit_exploded = df_credit.withColumn(
+    "credit_split", F.split(F.col("credit"), ",\s*")  # split by comma and optional space
+).withColumn("single_credit", F.explode(F.col("credit_split")))
+# remove leading/trailing spaces
+df_credit_exploded = df_credit_exploded.withColumn(
+    "single_credit", F.trim(F.col("single_credit")))
+# keep only unique credits per eid
+df_credit_unique = df_credit_exploded.select("eid", "fields", "single_credit").dropDuplicates()
+# count unique credits per paper (eid)
+credits_per_paper = df_credit_unique.groupBy("eid").agg(
+    F.countDistinct("single_credit").alias("num_credit"))
+# overall descriptive statistics
+summary_overall_credit = (
+    credits_per_paper.agg(
+        F.expr("percentile_approx(num_credit, 0.0)").alias("min"),
+        F.expr("percentile_approx(num_credit, 0.25)").alias("q1"),
+        F.expr("percentile_approx(num_credit, 0.5)").alias("median"),
+        F.avg("num_credit").alias("mean"),
+        F.expr("percentile_approx(num_credit, 0.75)").alias("q3"),
+        F.expr("percentile_approx(num_credit, 1.0)").alias("max"),
+        F.stddev("num_credit").alias("sd")))
+# mode overall
+mode_value_credit = (
+    credits_per_paper.groupBy("num_credit")
+    .agg(F.count("*").alias("freq"))
+    .orderBy(F.desc("freq"), F.asc("num_credit"))
+    .limit(1)
+    .collect()[0]["num_credit"])
+summary_overall_credit = summary_overall_credit.withColumn("mode", F.lit(mode_value_credit))
+summary_overall_credit.show(truncate=False)
+# descriptive statistics per field
+credits_per_paper_field = df_credit_unique.groupBy("fields", "eid").agg(
+    F.countDistinct("single_credit").alias("num_credit"))
+summary_by_field_credit = (
+    credits_per_paper_field.groupBy("fields")
+    .agg(
+        F.expr("percentile_approx(num_credit, 0.0)").alias("min"),
+        F.expr("percentile_approx(num_credit, 0.25)").alias("q1"),
+        F.expr("percentile_approx(num_credit, 0.5)").alias("median"),
+        F.avg("num_credit").alias("mean"),
+        F.expr("percentile_approx(num_credit, 0.75)").alias("q3"),
+        F.expr("percentile_approx(num_credit, 1.0)").alias("max"),
+        F.stddev("num_credit").alias("sd")))
+# mode per field
+window = Window.partitionBy("fields").orderBy(F.desc("freq"), F.asc("num_credit"))
+mode_df_credit = (
+    credits_per_paper_field.groupBy("fields", "num_credit")
+    .agg(F.count("*").alias("freq"))
+    .withColumn("rank", F.row_number().over(window))
+    .filter(F.col("rank") == 1)
+    .select("fields", F.col("num_credit").alias("mode")))
+summary_by_field_credit_with_mode = summary_by_field_credit.join(mode_df_credit, on="fields")
+summary_by_field_credit_with_mode.show(truncate=False)
+
 ### SUPPLEMENTARY MATERIAL 2
 from pyspark.sql import functions as F
 # extract 'sourcetitle' from the 'source' column
@@ -296,119 +408,3 @@ df_source_exploded = df_final.select('issn', 'year', 'doi', F.col('source.source
 supplementary_material_2 = df_source_exploded.groupBy('issn', 'journal', 'year') \
                                                    .agg(F.countDistinct('doi').alias('unique_doi_count'))
 display(supplementary_material_2)
-
-### FIGURE 2
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import countDistinct, count
-spark = SparkSession.builder.appName("group_by_fields_num_au").getOrCreate()
-# group by 'doi' and count the number of unique 'auid' values
-figure2A = df_final.groupBy("doi").agg(
-    countDistinct("auid").alias("num_au"))
-# group by 'num_au' and count the number of papers
-figure2A = figure2A.groupBy("num_au").agg(
-    count("*").alias("num_paper"))
-# filter the results to include only rows where 'num_au' is less than or equal to 100
-figure2A = figure2A.filter(figure2A.num_au <= 50)
-# order the results in ascending order by 'num_au'
-figure2A = figure2A.orderBy(figure2A.num_au.asc())
-display(figure2A)
-
-### FIGURE 2
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import countDistinct, count
-spark = SparkSession.builder.appName("group_by_fields_num_au").getOrCreate()
-# group by 'fields' and 'doi' and count the number of unique 'auid' values
-figure2B = df_final.groupBy("fields", "doi").agg(
-    countDistinct("auid").alias("num_au"))
-# group by 'fields' and 'num_au' and count the number of papers
-figure2B = figure2B.groupBy("fields", "num_au").agg(
-    count("*").alias("num_paper"))
-# filter the results to include only rows where 'num_au' is less than or equal to 100
-figure2B = figure2B.filter(figure2B.num_au <= 50)
-# filter to plot each field individually
-figure2B = figure2B.filter(figure2B.fields == "health_sciences")
-# order the results in ascending order by 'num_au'
-figure2B = figure2B.orderBy(figure2B.num_au.asc())
-display(figure2B)
-
-### FIGURE 3
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import collect_list, col, concat_ws, regexp_replace, explode, size, split, collect_set
-from pyspark.sql import functions as F
-spark = SparkSession.builder.appName("group_by_doi").getOrCreate()
-# group by 'doi' and collect all data related to each individual 'doi' for all the other variables
-figure3A = df_final.groupBy("doi").agg(
-    collect_list("credit").alias("credit_list"),
-    collect_list("fields").alias("fields_list"))
-# convert the 'credit_list' variable into a single string format
-figure3A = figure3A.withColumn("credit_string", concat_ws(", ", col("credit_list")))
-# remove the square brackets and quotes from the string
-figure3A = figure3A.withColumn("credit_string", regexp_replace("credit_string", "[\[\]']", ""))
-# split the 'credit_string' variable into an array of keywords
-figure3A = figure3A.withColumn("credit_array", split(col("credit_string"), ", "))
-# explode the 'credit_array' column into separate rows
-figure3A = figure3A.withColumn("credit_exploded", explode(col("credit_array")))
-# count the number of unique keywords per cell in the 'credit_array' column
-figure3A = figure3A.groupBy("doi").agg(
-    size(collect_set("credit_exploded")).alias("num_unique_keywords"),
-    collect_set("credit_list").alias("credit_list"),
-    collect_set("fields_list").alias("fields_list"))
-# merge the 'num_unique_keywords' variable from 'figure3A' with the 'fields' variable from 'df_final' by 'doi'
-figure3A = figure3A.join(df_final, "doi").select(
-    col("doi"),
-    col("num_unique_keywords"),
-    col("fields"))
-# remove duplicate rows
-figure3A = figure3A.dropDuplicates()
-# drop the 'fields' column
-figure3A = figure3A.drop('fields')
-# keep only unique combinations of 'doi' and 'num_unique_keywords'
-figure3A = figure3A.select('doi', 'num_unique_keywords').distinct()
-# filter out 'num_unique_keywords' equal to 15, group, count 'doi', and order by 'num_unique_keywords'
-figure3A = figure3A.filter(figure3A.num_unique_keywords <= 14) \
-               .groupBy('num_unique_keywords') \
-               .agg(F.count('doi').alias('doi_count')) \
-               .orderBy('num_unique_keywords', ascending=True)
-display(figure3A)
-
-### FIGURE 3
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import collect_list, col, concat_ws, regexp_replace, explode, size, split, collect_set
-from pyspark.sql import functions as F
-spark = SparkSession.builder.appName("group_by_doi").getOrCreate()
-# group by 'doi' and collect all data related to each individual 'doi' for all the other variables
-figure3B = df_final.groupBy("doi").agg(
-    collect_list("credit").alias("credit_list"),
-    collect_list("fields").alias("fields_list"))
-# convert the 'credit_list' variable into a single string format
-figure3B = figure3B.withColumn("credit_string", concat_ws(", ", col("credit_list")))
-# remove the square brackets and quotes from the string
-figure3B = figure3B.withColumn("credit_string", regexp_replace("credit_string", "[\[\]']", ""))
-# split the 'credit_string' variable into an array of keywords
-figure3B = figure3B.withColumn("credit_array", split(col("credit_string"), ", "))
-# explode the 'credit_array' column into separate rows
-figure3B = figure3B.withColumn("credit_exploded", explode(col("credit_array")))
-# count the number of unique keywords per cell in the 'credit_array' column
-figure3B = figure3B.groupBy("doi").agg(
-    size(collect_set("credit_exploded")).alias("num_unique_keywords"),
-    collect_set("credit_list").alias("credit_list"),
-    collect_set("fields_list").alias("fields_list"))
-# merge the 'num_unique_keywords' variable with 'fields' variable from 'df_final' by 'doi'
-figure3B = figure3B.join(df_final, "doi").select(
-    col("doi"),
-    col("num_unique_keywords"),
-    col("fields"))
-# filter by the 'social_sciences' field
-figure3B = figure3B.filter(col("fields") == "health_sciences")
-# remove duplicate rows
-figure3B = figure3B.dropDuplicates()
-# drop the 'fields' column
-figure3B = figure3B.drop('fields')
-# keep only unique combinations of 'doi' and 'num_unique_keywords'
-figure3B = figure3B.select('doi', 'num_unique_keywords').distinct()
-# filter out 'num_unique_keywords' equal to 15, group, count 'doi', and order by 'num_unique_keywords'
-figure3B = figure3B.filter(figure3B.num_unique_keywords <= 14) \
-               .groupBy('num_unique_keywords') \
-               .agg(F.count('doi').alias('doi_count')) \
-               .orderBy('num_unique_keywords', ascending=True)
-display(figure3B)
